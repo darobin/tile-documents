@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -56,7 +56,7 @@ fn load_tile(
 // ── tile: custom protocol ─────────────────────────────────────────────────────
 
 fn handle_tile_protocol(
-    app: &AppHandle,
+    app: &AppHandle<impl tauri::Runtime>,
     request: tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
     let uri = request.uri();
@@ -98,13 +98,16 @@ fn handle_tile_protocol(
         None => return error(404, &format!("no resource at {path}")),
     };
 
-    let data = match tile.read_block(&resource.src) {
+    let src = match resource.get("src") {
+        Some(s) => s.as_str(),
+        None => return error(500, "resource missing src"),
+    };
+    let data = match tile.read_block(src) {
         Ok(d) => d,
         Err(e) => return error(500, &e.to_string()),
     };
 
     let content_type = resource
-        .headers
         .get("content-type")
         .cloned()
         .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -115,8 +118,8 @@ fn handle_tile_protocol(
         .header("access-control-allow-origin", "*");
 
     // Forward any other headers from the MASL resource entry.
-    for (k, v) in &resource.headers {
-        if k != "content-type" {
+    for (k, v) in resource {
+        if k != "content-type" && k != "src" {
             builder = builder.header(k.as_str(), v.as_str());
         }
     }
@@ -133,7 +136,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(TileStore(Mutex::new(HashMap::new())))
-        .register_uri_scheme_protocol("tile", handle_tile_protocol)
+        .register_uri_scheme_protocol("tile", |ctx, request| {
+            handle_tile_protocol(ctx.app_handle(), request)
+        })
         .invoke_handler(tauri::generate_handler![open_tile])
         .setup(|app| {
             // Handle files passed as CLI arguments (Windows / Linux).

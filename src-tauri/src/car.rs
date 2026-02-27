@@ -7,7 +7,13 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-// ── MASL types ──────────────────────────────────────────────────────────────
+// ── MASL types ───────────────────────────────────────────────────────────────
+//
+// Resources are stored as flat maps: "src" → CID string, other keys → HTTP
+// header values.  This mirrors the MASL structure directly (headers are
+// siblings of `src`, not nested under a "headers" key).
+
+pub type Resource = HashMap<String, String>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Masl {
@@ -25,16 +31,6 @@ pub struct Masl {
     pub background_color: Option<String>,
 }
 
-/// A resource entry in the MASL resource map.
-/// The `src` is the CID string of the block containing this resource's data.
-/// `headers` holds HTTP headers (e.g., "content-type").
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Resource {
-    pub src: String,
-    #[serde(flatten)]
-    pub headers: HashMap<String, String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Icon {
     pub src: String,
@@ -46,13 +42,13 @@ pub struct Icon {
 
 // ── Tile content ─────────────────────────────────────────────────────────────
 
-/// Parsed tile: keeps file path + MASL + a CID→(offset,len) index so we can
-/// seek into the CAR on demand instead of loading every block into RAM.
+/// Parsed tile: keeps the file path + MASL + a CID→(offset, len) index so
+/// individual blocks can be served by seeking into the file on demand.
 #[derive(Debug)]
 pub struct TileContent {
     pub path: PathBuf,
     pub masl: Masl,
-    /// CID (canonical string form) → (byte offset of data, byte length of data)
+    /// CID (canonical string form) → (byte offset of block data, byte length)
     pub index: HashMap<String, (u64, u64)>,
 }
 
@@ -73,8 +69,8 @@ impl TileContent {
 
 // ── CAR parsing ──────────────────────────────────────────────────────────────
 
-/// Parse a `.tile` (CARv1) file. Returns a `TileContent` with MASL metadata
-/// and a CID→offset index over the file's blocks.
+/// Parse a `.tile` (CARv1) file. Returns `TileContent` with MASL metadata and
+/// a CID→offset index built from the file's blocks.
 pub fn parse_tile(path: &Path) -> Result<TileContent> {
     let mut f = File::open(path)?;
     let mut data = Vec::new();
@@ -107,35 +103,25 @@ pub fn parse_tile(path: &Path) -> Result<TileContent> {
             break;
         }
 
-        let block_start = pos;
         let block_end = pos + block_len as usize;
         if block_end > data.len() {
             bail!("block extends beyond file at pos {pos}");
         }
 
-        // Parse CID from the beginning of the block.
-        let cid = parse_cid_from_slice(&data[pos..])
+        let (cid, cid_len) = read_cid(&data[pos..])
             .ok_or_else(|| anyhow!("failed to parse CID at pos {pos}"))?;
-        let cid_len = cid_byte_length(&data[pos..])
-            .ok_or_else(|| anyhow!("failed to measure CID length at pos {pos}"))?;
 
         let data_offset = (pos + cid_len) as u64;
         let data_len = (block_len as usize - cid_len) as u64;
-
         index.insert(cid.to_string(), (data_offset, data_len));
 
         pos = block_end;
-        let _ = block_start; // used for clarity
     }
 
-    Ok(TileContent {
-        path: path.to_path_buf(),
-        masl,
-        index,
-    })
+    Ok(TileContent { path: path.to_path_buf(), masl, index })
 }
 
-// ── MASL extraction from CBOR header ────────────────────────────────────────
+// ── MASL extraction from CBOR header ─────────────────────────────────────────
 
 fn parse_masl(header_bytes: &[u8]) -> Result<Masl> {
     let value: CborValue = ciborium::de::from_reader(header_bytes)
@@ -187,37 +173,38 @@ fn parse_resources(v: &CborValue) -> Result<HashMap<String, Resource>> {
     let mut out = HashMap::new();
     for (k, rv) in map {
         let path = cbor_to_string(k).ok_or_else(|| anyhow!("resource key is not a string"))?;
-        let resource = parse_resource(rv)?;
-        out.insert(path, resource);
+        out.insert(path, parse_resource(rv)?);
     }
     Ok(out)
 }
 
+/// A resource entry is a flat map: `"src"` → CID string, other keys → header
+/// values.  This matches the MASL format where headers are siblings of `src`.
 fn parse_resource(v: &CborValue) -> Result<Resource> {
     let map = match v {
         CborValue::Map(m) => m,
         _ => bail!("resource entry is not a CBOR map"),
     };
 
-    let mut src: Option<String> = None;
-    let mut headers: HashMap<String, String> = HashMap::new();
+    let mut out: Resource = HashMap::new();
 
     for (k, rv) in map {
         let key = cbor_to_string(k).unwrap_or_default();
-        match key.as_str() {
-            "src" => src = Some(cbor_to_cid_string(rv).ok_or_else(|| anyhow!("resource `src` is not a CID"))?),
-            other => {
-                if let Some(s) = cbor_to_string(rv) {
-                    headers.insert(other.to_string(), s);
-                }
-            }
-        }
+        let value = if key == "src" {
+            cbor_to_cid_string(rv)
+                .ok_or_else(|| anyhow!("resource `src` is not a CID"))?
+        } else if let Some(s) = cbor_to_string(rv) {
+            s
+        } else {
+            continue; // skip non-string header values
+        };
+        out.insert(key, value);
     }
 
-    Ok(Resource {
-        src: src.ok_or_else(|| anyhow!("resource missing `src` field"))?,
-        headers,
-    })
+    if !out.contains_key("src") {
+        bail!("resource missing `src` field");
+    }
+    Ok(out)
 }
 
 fn parse_icons(v: &CborValue) -> Result<Vec<Icon>> {
@@ -249,7 +236,7 @@ fn parse_icons(v: &CborValue) -> Result<Vec<Icon>> {
     Ok(out)
 }
 
-// ── CBOR helpers ─────────────────────────────────────────────────────────────
+// ── CBOR helpers ──────────────────────────────────────────────────────────────
 
 fn cbor_to_string(v: &CborValue) -> Option<String> {
     match v {
@@ -258,12 +245,12 @@ fn cbor_to_string(v: &CborValue) -> Option<String> {
     }
 }
 
-/// Extract a CID from a DAG-CBOR CID link: Tag(42, Bytes(0x00 || raw_cid))
+/// Extract a CID from a DAG-CBOR CID link: `Tag(42, Bytes(0x00 || raw_cid))`.
+/// The leading `0x00` byte is the identity multibase prefix.
 fn cbor_to_cid_string(v: &CborValue) -> Option<String> {
     match v {
         CborValue::Tag(42, inner) => {
             if let CborValue::Bytes(bytes) = inner.as_ref() {
-                // DAG-CBOR CID links: leading 0x00 is identity multibase prefix
                 let raw = if bytes.first() == Some(&0x00) { &bytes[1..] } else { bytes };
                 Cid::try_from(raw).ok().map(|c| c.to_string())
             } else {
@@ -293,30 +280,25 @@ fn read_uvarint(data: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
-/// Parse a CID from the start of a byte slice using `std::io::Cursor`.
-fn parse_cid_from_slice(data: &[u8]) -> Option<Cid> {
+/// Parse a CID from the start of a slice. Returns `(cid, bytes_consumed)`.
+fn read_cid(data: &[u8]) -> Option<(Cid, usize)> {
     let mut cursor = std::io::Cursor::new(data);
-    Cid::read_bytes(&mut cursor).ok()
+    let cid = Cid::read_bytes(&mut cursor).ok()?;
+    Some((cid, cursor.position() as usize))
 }
 
-/// Return the number of bytes a CID occupies at the start of the slice.
-fn cid_byte_length(data: &[u8]) -> Option<usize> {
-    let mut cursor = std::io::Cursor::new(data);
-    Cid::read_bytes(&mut cursor).ok()?;
-    Some(cursor.position() as usize)
-}
+// ── Authority helper ──────────────────────────────────────────────────────────
 
-// ── Authority helpers ─────────────────────────────────────────────────────────
-
-/// Derive a URI authority from a file stem (e.g. "my document" → "my-document").
+/// Derive a `tile:` URI authority from the full file name.
+/// e.g. `"My Document.tile"` → `"my-document.tile"`.
 pub fn authority_from_path(path: &Path) -> String {
-    let stem = path
-        .file_stem()
+    let name = path
+        .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("tile");
-    stem.to_lowercase()
+    name.to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
         .collect::<String>()
         .trim_matches('-')
         .to_string()

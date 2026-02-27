@@ -9,7 +9,8 @@
       "Bash(git sparse-checkout set examples/file-associations)",
       "WebFetch(domain:docs.rs)",
       "WebFetch(domain:www.npmjs.com)",
-      "WebFetch(domain:registry.npmjs.org)"
+      "WebFetch(domain:registry.npmjs.org)",
+      "Bash(cargo check:*)"
     ]
   }
 }
