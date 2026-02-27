@@ -37,15 +37,52 @@ This project is a Tauri v2 application with the following characteristics:
 
 ## Commands
 
-Once the Rust project is initialized (`Cargo.toml` present), standard commands apply:
-
 ```sh
-cargo build          # build
-cargo test           # run all tests
-cargo test <name>    # run a single test by name
-cargo clippy         # lint
-cargo fmt            # format
+npm install                      # install frontend deps
+npm run tauri dev                # run dev build (starts Vite + Tauri)
+npm run tauri build              # production build
+
+# Rust only (from repo root or src-tauri/)
+cargo build                      # build backend
+cargo test                       # run all tests
+cargo test <name>                # run a single test
+cargo clippy                     # lint
+cargo fmt                        # format
 ```
+
+## Architecture
+
+```
+tile-documents/
+├── index.html            # Vite entry point
+├── src/
+│   ├── main.js           # Root <tile-app> element; listens for tile:opened events
+│   ├── state.js          # refrakt store (tabs[], activeIndex)
+│   └── components/
+│       ├── tab-bar.js    # <tile-tab-bar>: tab strip + "Open" button
+│       └── tile-tab.js   # <tile-content>: iframes for each open tile
+└── src-tauri/
+    ├── tauri.conf.json   # app config, file associations (.tile / application/tile)
+    ├── capabilities/     # Tauri v2 permission declarations
+    └── src/
+        ├── main.rs       # calls lib::run()
+        ├── lib.rs        # Tauri builder: tile: protocol, open_tile command, deep-link setup
+        └── car.rs        # CAR v1 parser + MASL extraction
+```
+
+### Data flow
+
+1. A `.tile` file is opened (CLI arg, OS file-open, or dialog).
+2. `car::parse_tile()` reads the file: decodes the CBOR header to extract **MASL** (name, resources map, icons), then walks all CAR blocks recording each block's **byte offset** in the file keyed by CID.
+3. The tile is stored in `TileStore` (authority → `TileContent`) and a `tile:opened` event is emitted to the frontend with `{ authority, masl }`.
+4. The frontend's `state.js` (refrakt store) appends a new tab; `<tile-tab-bar>` renders the tab using `masl.name` and `masl.icons[0]`; `<tile-content>` shows an `<iframe src="tile://<authority>/">`.
+5. The `tile:` URI scheme handler in `lib.rs` resolves each request: looks up the URL path in `masl.resources`, seeks to the stored offset in the file, reads the block bytes, and returns them with the headers declared in the resource entry.
+
+### Key conventions
+
+- **Authority**: derived from the tile filename stem (lowercased, non-alphanumeric → `-`).
+- **MASL CID links** in the header CBOR are DAG-CBOR Tag(42, bytes) where the first byte is the identity-multibase prefix `0x00` followed by raw CID bytes.
+- **Lit + refrakt**: components extend `SignalWatcher(LitElement)` from `@lit-labs/signals` so they re-render automatically when the refrakt store's TC39 signal updates.
 
 ## License
 

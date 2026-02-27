@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:dasl.ing)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:v2.tauri.app)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git sparse-checkout set examples/file-associations)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:registry.npmjs.org)"
+    ]
+  }
+}
