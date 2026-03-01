@@ -5,6 +5,7 @@ import { store } from 'refrakt';
 export const ADD_TAB = 'ADD_TAB';
 export const CLOSE_TAB = 'CLOSE_TAB';
 export const ACTIVATE_TAB = 'ACTIVATE_TAB';
+export const SET_FULLSCREEN = 'SET_FULLSCREEN';
 
 // ── Reducer ───────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,9 @@ function reducer(state, action) {
     case ACTIVATE_TAB: {
       return { ...state, activeIndex: action.index };
     }
+    case SET_FULLSCREEN: {
+      return { ...state, fullscreen: action.fullscreen };
+    }
     default:
       return state;
   }
@@ -32,7 +36,7 @@ function reducer(state, action) {
 
 // ── Store ─────────────────────────────────────────────────────────────────────
 
-export const appStore = store(reducer, { tabs: [], activeIndex: -1 });
+export const appStore = store(reducer, { tabs: [], activeIndex: -1, fullscreen: false });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -46,4 +50,8 @@ export function closeTab(index) {
 
 export function activateTab(index) {
   appStore.send({ type: ACTIVATE_TAB, index });
+}
+
+export function setFullscreen(fullscreen) {
+  appStore.send({ type: SET_FULLSCREEN, fullscreen });
 }

@@ -1,12 +1,14 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
+import { SignalWatcher } from '@lit-labs/signals';
 import { listen } from '@tauri-apps/api/event';
-import { addTab } from './state.js';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { addTab, appStore, setFullscreen } from './state.js';
 import './components/tab-bar.js';
 import './components/tile-tab.js';
 
 // ── Root app shell ────────────────────────────────────────────────────────────
 
-class TileApp extends LitElement {
+class TileApp extends SignalWatcher(LitElement) {
   static styles = css`
     :host {
       display: flex;
@@ -18,16 +20,26 @@ class TileApp extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    // Listen for tiles opened by the backend (OS file-open, CLI arg, etc.)
+
+    // Sync initial fullscreen state (e.g. restored from last session).
+    getCurrentWindow()
+      .isFullscreen()
+      .then((isFs) => { if (isFs) setFullscreen(true); });
+
     listen('tile:opened', (event) => {
       const { authority, masl } = event.payload;
       addTab(authority, masl);
     });
+
+    listen('tile:fullscreen-changed', (event) => {
+      setFullscreen(event.payload);
+    });
   }
 
   render() {
+    const { fullscreen } = appStore.get();
     return html`
-      <tile-tab-bar></tile-tab-bar>
+      ${fullscreen ? nothing : html`<tile-tab-bar></tile-tab-bar>`}
       <tile-content></tile-content>
     `;
   }

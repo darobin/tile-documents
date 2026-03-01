@@ -4,8 +4,11 @@ use car::{authority_from_path, parse_tile, Masl, TileContent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Listener, Manager, State};
+use tauri_plugin_window_state::{Builder as WindowStateBuilder, StateFlags, WindowExt};
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -132,6 +135,7 @@ fn handle_tile_protocol(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(WindowStateBuilder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -140,10 +144,80 @@ pub fn run() {
             handle_tile_protocol(ctx.app_handle(), request)
         })
         .invoke_handler(tauri::generate_handler![open_tile])
+        .menu(|app| {
+            let accel = if cfg!(target_os = "macos") {
+                "Command+Control+F"
+            } else {
+                "F11"
+            };
+
+            let toggle_fs =
+                MenuItemBuilder::with_id("toggle_fullscreen", "Toggle Full Screen")
+                    .accelerator(accel)
+                    .build(app)?;
+
+            let view = SubmenuBuilder::new(app, "View").item(&toggle_fs).build()?;
+
+            let mut builder = MenuBuilder::new(app);
+
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::PredefinedMenuItem;
+                let app_menu = SubmenuBuilder::new(app, "Tile Documents")
+                    .item(&PredefinedMenuItem::about(app, None, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::services(app, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::hide(app, None)?)
+                    .item(&PredefinedMenuItem::hide_others(app, None)?)
+                    .item(&PredefinedMenuItem::show_all(app, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::quit(app, None)?)
+                    .build()?;
+                builder = builder.item(&app_menu);
+            }
+
+            builder.item(&view).build()
+        })
+        .on_menu_event(|app, event| {
+            if event.id() == "toggle_fullscreen" {
+                if let Some(window) = app.get_webview_window("main") {
+                    let is_fs = window.is_fullscreen().unwrap_or(false);
+                    let _ = window.set_fullscreen(!is_fs);
+                }
+            }
+        })
         .setup(|app| {
+            let app_handle = app.handle().clone();
+
+            // Restore saved window state (position, size, fullscreen) and set
+            // up a listener that notifies the frontend on any fullscreen change.
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.restore_state(StateFlags::all());
+
+                // Track the last known fullscreen state so we emit only on
+                // actual changes. This covers menu/keyboard, the macOS green
+                // button, and ESC-to-exit – anything that causes a Resized
+                // event.
+                let app_for_event = app_handle.clone();
+                let last_fs = Arc::new(AtomicBool::new(
+                    window.is_fullscreen().unwrap_or(false),
+                ));
+                window.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::Resized(_)) {
+                        if let Some(win) = app_for_event.get_webview_window("main") {
+                            let is_fs = win.is_fullscreen().unwrap_or(false);
+                            let prev = last_fs.swap(is_fs, Ordering::Relaxed);
+                            if prev != is_fs {
+                                let _ = app_for_event.emit("tile:fullscreen-changed", is_fs);
+                            }
+                        }
+                    }
+                });
+            }
+
             // Handle files passed as CLI arguments (Windows / Linux).
             let args: Vec<String> = std::env::args().skip(1).collect();
-            let app_handle = app.handle().clone();
             let state = app_handle.state::<TileStore>();
             for arg in &args {
                 let p = PathBuf::from(arg);
@@ -155,7 +229,7 @@ pub fn run() {
             // Handle macOS / deep-link file-open events.
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             {
-                let app_handle2 = app.handle().clone();
+                let app_handle2 = app_handle.clone();
                 app.listen("deep-link://new-url", move |event| {
                     if let Ok(urls) = serde_json::from_str::<Vec<String>>(event.payload()) {
                         let state = app_handle2.state::<TileStore>();
